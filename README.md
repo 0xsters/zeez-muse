@@ -1,8 +1,5 @@
 # muse.ai 注册 / 邀请码兑换 协议分析
 
-AI羊毛工具站：https://fuse.tokenfly.shop
-交流群: https://t.me/muihbb
-
 
 纯 HTTP 实现 muse.ai 的注册与邀请码兑换流程，不依赖浏览器。本文记录的是通过抓包逐字段比对得出的协议细节。
 
