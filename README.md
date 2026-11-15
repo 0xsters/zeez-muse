@@ -21,6 +21,7 @@ musepy/
   caa.py       注册漏斗事件上报（可选）
 example_register.py   端到端示例
 config.example.json   配置模板
+test_onboarding_smoke.py   离线冒烟（披露解析纯函数，不联网）
 ```
 
 ## 协议流程
@@ -29,14 +30,19 @@ config.example.json   配置模板
 GET  /                                   拿初始 cookie
 POST /api/auth/native/restart            → 201 {csrf_token}
 POST /api/auth/native/send-otp           → 201
-POST /api/auth/native/confirm-otp        → 200 {registration_state:"completion_required"}
+POST /api/auth/native/confirm-otp        → 200 {registration_state:"completion_required",
+                                               tos:{content_version}}（动态 TOS 版本）
 POST /api/auth/native/register-completion→ 200 {auth_meta_session:{frl_access_token, frl_account_id}}
-POST /api/hatch/accept-tos               → 200（激活会话，必须）
+POST auth.meta.com/hatch/session/bootstrap/ → 302…→ muse.ai 200 HTML（会话引导，必须）
+     └ 从 muse.ai 文档解析动态披露 disclosure_text/disclosure_version 与状态门
+       （resolvedDestination/isGeoGated/waitlist → 地区受限）
+POST /api/hatch/accept-tos               → 200（单次调用；正文用服务端动态披露，非硬编码）
 GET  /api/hatch/invite                   → 200 表示账号有效
-POST /api/hatch/vm/wake                  → 200（必须，否则兑换误报 invalid）
+POST /api/hatch/vm/wake                  → 200（必须，否则兑换误报 invalid；
+                                             wake_trigger=mount + open_id + away_ms=0）
 POST /api/hatch/stateful-sharing         → 200
 POST /api/hatch/invite-code/redeem       → 200 {redemptionStatus:"redeemed"}
-POST /api/hatch/invite                   → 200 {code}（刮出自己的码）
+POST /api/hatch/invite                   → 200 {code}（取回自己的码，不等于页面刮开 reveal）
 ```
 
 ## 几个容易踩的坑
@@ -67,9 +73,17 @@ POST /api/hatch/invite                   → 200 {code}（刮出自己的码）
 {"resume": false}
 ```
 
-### 4. `accept-tos` 是会话激活开关
+### 4. `accept-tos` 是会话激活开关，且必须先引导会话
 
-注册完成后 `GET /api/hatch/invite` 会是 403。必须先调 `accept-tos`，且 `disclosure_text` 要填完整日文文案（不是随便一个字符串），之后 invite 才返回 200。
+注册完成后**必须先走 `POST auth.meta.com/hatch/session/bootstrap/`**（form 表单只带
+`frl_access_token`，手动跟随 302/301/303 跳转落到 muse.ai 200 文档），否则后续
+hatch 接口一律 403。引导落地的 muse.ai 文档里带有 Next Flight 序列化的动态披露
+（`disclosureText` / `disclosureVersion`，当前实测版本为 `HATCH_ROW_v0`），`accept-tos`
+的正文必须用服务端返回的这份动态文案（**不是**硬编码常量），`Referer` 用披露页
+URL；单次调用即可，不重试，403 时把响应体前 200 字符带出来便于诊断。
+
+引导后若服务端判定 `resolvedDestination == "waitlist"` 或 `isGeoGated == true`，
+属于**地区受限**：注册已完成、账号保留，但未证明已加入名单。
 
 ### 5. `vm/wake` 缺失会让兑换误报
 
@@ -84,6 +98,9 @@ POST /api/hatch/invite                   → 200 {code}（刮出自己的码）
 ```python
 re.search(r'vmId[\\"]*:[\\"]*([0-9a-fA-F-]{36})', html)
 ```
+
+`wake` 的 body 实测为：`wake_trigger: "mount"`（首连）、`open_id`（新 uuid）、
+`away_ms: 0`，而不是早期的 `resume`。
 
 ### 6. 兑换失败原因的含义
 
