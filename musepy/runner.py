@@ -62,8 +62,16 @@ def mkproxy(line):
     A leading http:// or https:// scheme is stripped first, so a line copied
     from a proxy list with its scheme still parses instead of raising
     proxy_line_format.
+
+    The special line DIRECT (case-insensitive) means no proxy at all: the
+    client connects straight through the machine's own network, so a
+    system-wide VPN (for example Proton VPN Japan) becomes the egress IP.
+    mkproxy returns "" for it, and client.py already treats a falsy proxy
+    as a direct connection.
     """
     line = (line or "").strip()
+    if line.lower() == "direct":
+        return ""
     lowered = line.lower()
     for scheme in ("http://", "https://"):
         if lowered.startswith(scheme):
@@ -256,6 +264,8 @@ def fetch_proxies_from_apis(timeout=12):
 
 def proxy_endpoint(line):
     """Take only host:port, for logging (never print credentials)."""
+    if (line or "").strip().lower() == "direct":
+        return "DIRECT"
     parts = (line or "").split(":")
     return f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else None
 
@@ -320,8 +330,12 @@ class BatchRunner:
     @staticmethod
     def _default_ip_resolver(proxy_url):
         from curl_cffi import requests as cr
-        r = cr.get("https://api.ipify.org", impersonate="chrome142",
-                   proxies={"http": proxy_url, "https": proxy_url}, timeout=12)
+        if proxy_url:
+            r = cr.get("https://api.ipify.org", impersonate="chrome142",
+                       proxies={"http": proxy_url, "https": proxy_url}, timeout=12)
+        else:
+            # DIRECT mode: no proxy, resolve the machine's own egress IP.
+            r = cr.get("https://api.ipify.org", impersonate="chrome142", timeout=12)
         ip = r.text.strip()
         return ip if ip.count(".") == 3 else None
 
@@ -347,6 +361,10 @@ class BatchRunner:
         api_proxies = fetch_proxies_from_apis() if self.proxy_api else []
         seen = set(api_proxies)
         proxies = api_proxies + [line for line in file_proxies if line not in seen]
+        if any(line.strip().lower() == "direct" for line in proxies):
+            # DIRECT mode: ignore every proxy and connect straight through the
+            # system VPN. Mixing dead free proxies in would only burn retries.
+            proxies = ["DIRECT"]
         print(f"[i] proxy pool: {len(api_proxies)} from APIs, "
               f"{len(file_proxies)} from file, {len(proxies)} total")
         if not proxies:

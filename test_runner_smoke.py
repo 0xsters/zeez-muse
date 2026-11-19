@@ -181,6 +181,27 @@ def case_mkproxy_scheme():
         raise AssertionError("mkproxy accepted a bare host")
 
 
+def case_direct_mode():
+    # DIRECT means no proxy: the client connects straight through the VPN.
+    assert mkproxy("DIRECT") == ""
+    assert mkproxy("direct") == ""
+    assert mkproxy("  Direct  ") == ""
+    with tempfile.TemporaryDirectory() as d:
+        # A DIRECT-only pool inits fine and is never mixed with dead proxies.
+        runner, clients = make_runner(d, EMAILS[:1], ["DIRECT"], 1, FakeClient)
+        assert runner.PX == ["DIRECT"], runner.PX
+        line, _ = runner._pick_proxy()
+        assert line == "DIRECT", line
+        runner.run()
+        assert clients[0].proxy_url == "", clients[0].proxy_url
+    with tempfile.TemporaryDirectory() as d:
+        # DIRECT in the file wins over API/file proxies (proxy_api off here,
+        # so the file list is the whole pool; the point is no mixing).
+        runner, _ = make_runner(d, EMAILS[:1], ["DIRECT", "10.0.0.9:8009"], 1,
+                                FakeClient)
+        assert runner.PX == ["DIRECT"], runner.PX
+
+
 def case_select_otp_idempotent():
     before = "2026-01-01T00:00:00+00:00"
     after = "2026-01-01T00:01:00+00:00"
@@ -319,6 +340,7 @@ def case_record_fields_no_secrets():
 
 def main():
     tests = [("mkproxy_scheme", case_mkproxy_scheme),
+             ("direct_mode", case_direct_mode),
              ("select_otp_idempotent", case_select_otp_idempotent),
              ("wait_otp_poll", case_wait_otp_poll),
              ("claim_exclusive", case_claim_exclusive),
