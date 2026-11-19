@@ -128,6 +128,10 @@ PROXY_API_SOURCES = (
     ("proxywing",
      "https://proxywing.com/api/free-proxy-list?format=txt&country=JP&protocol=http",
      "text"),
+    ("clearproxy",
+     "https://raw.githubusercontent.com/ClearProxy/checked-proxy-list/main"
+     "/http/raw/country/JP.txt",
+     "text"),
 )
 
 
