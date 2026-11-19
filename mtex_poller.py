@@ -72,6 +72,7 @@ CREDS_FILE = os.path.expanduser("~/.cf-temp-mail/credentials.json")
 ADDRS_FILE = os.path.expanduser("~/.cf-temp-mail/addresses.json")
 TOKEN_FILE = os.path.join(HERE, "turso_token.txt")
 SEEN_FILE = os.path.join(HERE, "mtex_seen.jsonl")
+STORED_FILE = os.path.join(HERE, "mtex_stored.jsonl")
 PID_FILE = os.path.join(HERE, "mtex_poller.pid")
 
 BASE_URL = "https://mail.mtex.my.id"
@@ -217,6 +218,41 @@ def log_seen(email_addr, mail, code):
         f.write(json.dumps(row) + "\n")
 
 
+_STORED = None
+
+
+def _stored_set():
+    """(email, mail_id) pairs already inserted into Turso, cached.
+    Dedupe by mail id, NOT by code: the Turso unique index is
+    (email, otp, time), so re-inserting the same mail with a fresh
+    first-seen time creates a duplicate row, and the batch's
+    select_otp (newest code after send) would then pick a STALE code
+    that only looks new. Each mail is stored exactly once."""
+    global _STORED
+    if _STORED is None:
+        _STORED = set()
+        try:
+            with open(STORED_FILE, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                        if row.get("email") and row.get("mail_id") is not None:
+                            _STORED.add((row["email"], row["mail_id"]))
+                    except Exception:
+                        pass
+        except OSError:
+            pass
+    return _STORED
+
+
+def _mark_stored(email_addr, mail, code):
+    row = {"email": email_addr, "mail_id": mail.get("id"),
+           "otp": code, "stored_at": _now_iso()}
+    with open(STORED_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+    _stored_set().add((email_addr, mail.get("id")))
+
+
 def insert_otp(email_addr, code, iso_time, turso_token):
     payload = {
         "requests": [
@@ -292,7 +328,11 @@ def check_address(rec, turso_token):
             print("[%s] non-OTP code seen (sender %s), logged only"
                   % (email_addr, sender or "?"), flush=True)
             continue
+        mail_key = (email_addr, mail.get("id"))
+        if mail_key in _stored_set():
+            continue
         if insert_otp(email_addr, code, _now_iso(), turso_token):
+            _mark_stored(email_addr, mail, code)
             stored += 1
             print("[%s] OTP %s stored" % (email_addr, code), flush=True)
     return stored
