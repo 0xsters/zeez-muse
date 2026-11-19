@@ -130,7 +130,8 @@ Batch fields in `config.json`:
 | field | description |
 |---|---|
 | `otp_file` | Email list, one per line as `email----otp-source-URL` (the OTP source returns `[{"otp","time"},...]` JSON) |
-| `proxy_file` | Sticky proxy pool, one per line as `host:port:user:pass` (or `host:port`) |
+| `proxy_file` | Sticky proxy pool, one per line as `host:port:user:pass` (or `host:port`); fallback when the proxy APIs return nothing |
+| `proxy_api` | Whether to fetch fresh Japan HTTP proxies from free APIs at batch start (default true); set false to use only `proxy_file` |
 | `codes_file` | Optional pool of invite codes to redeem, one per line |
 | `output_dir` / `tried_file` | Per-account result JSON directory / list of already-tried emails |
 | `workers` / `max_per_ip` | Number of workers (default 5) / per-proxy limit of successful verifications (default 6) |
@@ -139,6 +140,9 @@ Batch fields in `config.json`:
 
 Scheduling semantics (aligned with the local implementation; no bypass behavior is promised):
 
+- **Proxy pool is fetched automatically**: at batch start the runner pulls fresh Japan HTTP proxies from free keyless APIs (Geonode, ProxyScrape v2, and the ProxyScrape free-proxy-list GitHub repo), merges them with `proxy_file`, and deduplicates. No manual copy-paste of proxy lists is needed; `proxy_file` stays as fallback, and `proxy_api: false` disables the fetch.
+- **Japan-only egress gate**: a proxy line is usable only when its egress IP resolves and exits in Japan. A line whose exit node sits in another country (the list may label it JP while the exit is elsewhere) is skipped exactly like a dead line. If the geo lookup itself fails, the line is accepted unchecked so a down geo service never kills the run.
+- **A leading `http://` / `https://` scheme in a proxy line is tolerated**: it is stripped before parsing, so pasted list entries with their scheme no longer raise `proxy_line_format`.
 - **Each worker exclusively holds one sticky proxy**: a proxy line belongs to only one worker at a time (claim/release),
   and workers never take another worker's line; lines are only shared (and logged) when the pool is exhausted.
 - **max_per_ip counts successful verifications**: when the limit is reached, release the current line and switch to another; the old line is avoided for the rest of the round.

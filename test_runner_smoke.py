@@ -123,7 +123,7 @@ def make_runner(tmp, email_lines, proxy_lines, count, maker, *, codes=None, **ov
     cfg = {"otp_file": otp_file, "proxy_file": proxy_file,
            "output_dir": os.path.join(tmp, "out"),
            "tried_file": os.path.join(tmp, "tried.txt"),
-           "workers": 1, "max_per_ip": 6, "resolve_ip": False,
+           "workers": 1, "max_per_ip": 6, "resolve_ip": False, "proxy_api": False,
            "send_caa": False, "lang": "ja", "impersonate": "chrome142"}
     if codes is not None:
         codes_file = os.path.join(tmp, "codes.txt")
@@ -167,6 +167,19 @@ PROXIES = ["10.0.0.1:8000:u:p", "10.0.0.2:8001:u:p", "10.0.0.3:8002:u:p"]
 
 
 # ---------- Test cases ----------
+
+def case_mkproxy_scheme():
+    assert mkproxy("http://10.0.0.1:8000") == "http://10.0.0.1:8000"
+    assert mkproxy("https://10.0.0.1:8000") == "http://10.0.0.1:8000"
+    assert mkproxy("10.0.0.1:8000") == "http://10.0.0.1:8000"
+    assert mkproxy("10.0.0.1:8000:u:p") == "http://u:p@10.0.0.1:8000"
+    try:
+        mkproxy("10.0.0.1")
+    except ValueError as exc:
+        assert str(exc) == "proxy_line_format"
+    else:
+        raise AssertionError("mkproxy accepted a bare host")
+
 
 def case_select_otp_idempotent():
     before = "2026-01-01T00:00:00+00:00"
@@ -305,7 +318,8 @@ def case_record_fields_no_secrets():
 
 
 def main():
-    tests = [("select_otp_idempotent", case_select_otp_idempotent),
+    tests = [("mkproxy_scheme", case_mkproxy_scheme),
+             ("select_otp_idempotent", case_select_otp_idempotent),
              ("wait_otp_poll", case_wait_otp_poll),
              ("claim_exclusive", case_claim_exclusive),
              ("sticky_reuse_and_switch", case_sticky_reuse_and_switch),

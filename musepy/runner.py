@@ -18,6 +18,7 @@ import json
 import os
 import random
 import threading
+import urllib.request
 from datetime import datetime, timezone
 
 from . import caa as _caa
@@ -52,8 +53,19 @@ def _lines(path):
 
 
 def mkproxy(line):
-    """host:port:user:pass → http://user:pass@host:port；host:port → http://host:port"""
-    parts = (line or "").split(":")
+    """host:port:user:pass → http://user:pass@host:port；host:port → http://host:port.
+
+    A leading http:// or https:// scheme is stripped first, so a line copied
+    from a proxy list with its scheme still parses instead of raising
+    proxy_line_format.
+    """
+    line = (line or "").strip()
+    lowered = line.lower()
+    for scheme in ("http://", "https://"):
+        if lowered.startswith(scheme):
+            line = line[len(scheme):]
+            break
+    parts = line.split(":")
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
@@ -61,6 +73,98 @@ def mkproxy(line):
         host, port = parts
         return f"http://{host}:{port}"
     raise ValueError("proxy_line_format")
+
+
+# Free proxy-list APIs (no key needed). Fetched directly, no proxy, at batch
+# start; every returned line is validated again by _resolve_ip before use,
+# so dead entries are skipped automatically. proxies.txt stays as fallback.
+PROXY_API_SOURCES = (
+    ("geonode",
+     "https://proxylist.geonode.com/api/proxy-list"
+     "?limit=100&page=1&sort_by=lastChecked&sort_type=desc"
+     "&country=JP&protocols=http%2Chttps",
+     "json"),
+    ("proxyscrape",
+     "https://api.proxyscrape.com/v2/?request=displayproxies"
+     "&protocol=http&timeout=10000&country=JP&ssl=all&anonymity=all",
+     "text"),
+    ("proxyscrape_github",
+     "https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main"
+     "/proxies/countries/jp/http/data.txt",
+     "text"),
+)
+
+
+def _fetch_text_lines(url, timeout):
+    """Plain-text proxy list: one bare "host:port" per line, scheme stripped."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        text = resp.read().decode("utf-8", "ignore")
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        lowered = line.lower()
+        for scheme in ("http://", "https://"):
+            if lowered.startswith(scheme):
+                line = line[len(scheme):]
+                break
+        if line and ":" in line:
+            lines.append(line)
+    return lines
+
+
+def geo_country(ip):
+    """Country code for an egress IP via ip-api.com (free, no key). None on any failure."""
+    try:
+        with urllib.request.urlopen(
+                f"http://ip-api.com/json/{ip}?fields=status,countryCode",
+                timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if payload.get("status") == "success":
+            return payload.get("countryCode")
+    except Exception:  # noqa: BLE001 - a failed lookup must not stop the batch
+        pass
+    return None
+
+
+def fetch_proxies_from_apis(timeout=12):
+    """Fetch fresh Japan HTTP proxy lines from the free APIs above.
+
+    Returns a deduplicated list of bare "host:port" lines, freshest first.
+    A source that fails (network error, bad payload) is logged and skipped;
+    the other source and proxies.txt still apply. Never raises.
+    """
+    found = []
+
+    def _add(source, lines):
+        seen = set(found)
+        fresh = [line for line in lines if line and line not in seen]
+        if fresh:
+            found.extend(fresh)
+        print(f"[i] proxy api {source}: {len(fresh)} lines")
+
+    for name, url, kind in PROXY_API_SOURCES:
+        try:
+            if kind == "json":
+                # Geonode: JSON, filter to elite/anonymous, fast, high-uptime entries.
+                with urllib.request.urlopen(url, timeout=timeout) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                lines = []
+                for item in payload.get("data", []):
+                    protocols = item.get("protocols") or []
+                    if not any(p in ("http", "https") for p in protocols):
+                        continue
+                    if item.get("anonymityLevel") not in ("elite", "anonymous"):
+                        continue
+                    if (item.get("latency") or 99999) > 3000 or (item.get("upTime") or 0) < 50:
+                        continue
+                    lines.append(f"{item['ip']}:{item['port']}")
+                _add(name, lines)
+            else:
+                _add(name, _fetch_text_lines(url, timeout))
+        except Exception as exc:  # noqa: BLE001 - one dead source must not stop the batch
+            print(f"[i] proxy api {name} failed: {exc}")
+
+    return found
 
 
 def proxy_endpoint(line):
@@ -86,7 +190,7 @@ def utc_stamp():
 class BatchRunner:
     """Multi-account batch scheduler. One account = a new MuseClient instance + one current sticky proxy line."""
 
-    def __init__(self, config, *, client_factory=None, otp_waiter=None, ip_resolver=None):
+    def __init__(self, config, *, client_factory=None, otp_waiter=None, ip_resolver=None, geo_resolver=None):
         self.cfg = config
         self.workers = int(config.get("workers", 5) or 5)
         self.max_per_ip = int(config.get("max_per_ip", 6) or 6)
@@ -94,15 +198,17 @@ class BatchRunner:
         self.fp = config.get("impersonate", "chrome142")
         self.otp_file = config.get("otp_file")
         self.proxy_file = config.get("proxy_file")
+        self.proxy_api = bool(config.get("proxy_api", True))
         self.codes_file = config.get("codes_file")
         self.output_dir = config.get("output_dir", "output")
         self.tried_file = config.get("tried_file")
         self.send_caa = bool(config.get("send_caa", False))
         self.resolve_ip = bool(config.get("resolve_ip", True))
-        # Injection points (for offline tests): client factory / OTP polling / egress IP resolution
+        # Injection points (for offline tests): client factory / OTP polling / egress IP resolution / geo lookup
         self.client_factory = client_factory or self._default_client_factory
         self.otp_waiter = otp_waiter or self._default_otp_waiter
         self.ip_resolver = ip_resolver or self._default_ip_resolver
+        self.geo_resolver = geo_resolver or geo_country
         self.ROWS, self.QUEUE, self.PX, self.CODES = {}, [], [], []
         self._lk = threading.Lock()
         self._codes_lk = threading.Lock()
@@ -110,6 +216,7 @@ class BatchRunner:
         self._stop = threading.Event()
         self._stop_reason = None
         self._proxy_claims, self._pool_bad, self._ipcache, self._tried = set(), set(), {}, set()
+        self._geocache = {}
         self._qi = [0]
         self._stats = {key: 0 for key in ("started", "ok", "pending", "server_rejected",
                                           "transport_error", "failed", "ip_switches")}
@@ -149,7 +256,12 @@ class BatchRunner:
             rows[email] = url.strip()
         tried = (set(_lines(self.tried_file))
                  if self.tried_file and os.path.exists(self.tried_file) else set())
-        proxies = _lines(self.proxy_file or "")
+        file_proxies = _lines(self.proxy_file or "")
+        api_proxies = fetch_proxies_from_apis() if self.proxy_api else []
+        seen = set(api_proxies)
+        proxies = api_proxies + [line for line in file_proxies if line not in seen]
+        print(f"[i] proxy pool: {len(api_proxies)} from APIs, "
+              f"{len(file_proxies)} from file, {len(proxies)} total")
         if not proxies:
             raise ValueError("proxy_pool_empty")
         with self._lk:
@@ -161,6 +273,7 @@ class BatchRunner:
             self._proxy_claims.clear()
             self._pool_bad.clear()
             self._ipcache.clear()
+            self._geocache.clear()
             self._qi[0] = 0
             for key in self._stats:
                 self._stats[key] = 0
@@ -196,8 +309,29 @@ class BatchRunner:
 
     # ---------- Proxy scheduling (worker-exclusive sticky) ----------
 
+    def _country_of(self, ip):
+        """Cached country code for an egress IP. None means the lookup failed."""
+        with self._lk:
+            if ip in self._geocache:
+                return self._geocache[ip]
+        country = None
+        try:
+            country = self.geo_resolver(ip)
+        except Exception:  # noqa: BLE001 - a failed lookup must not stop the batch
+            country = None
+        with self._lk:
+            self._geocache[ip] = country
+        return country
+
     def _resolve_ip(self, line):
-        """resolve_ip=false → (None, True): the egress IP is unknown but the line is still usable."""
+        """resolve_ip=false → (None, True): the egress IP is unknown but the line is still usable.
+
+        With resolve_ip on, a line is usable only when its egress IP resolves
+        AND exits in Japan. A non-JP exit (the proxy list may label it JP
+        while the exit node sits elsewhere) is treated exactly like a dead
+        line: skipped and marked pool_bad by the caller. A failed geo lookup
+        accepts the line unchecked, so a down geo service never kills the run.
+        """
         if not self.resolve_ip:
             return None, True
         with self._lk:
@@ -210,6 +344,12 @@ class BatchRunner:
                 ip = None
         except Exception:
             ip = None
+        if ip is not None:
+            country = self._country_of(ip)
+            if country is not None and country != "JP":
+                print(f"[i] proxy {proxy_endpoint(line)} exits in {country}, "
+                      f"not JP, skipping")
+                ip = None
         with self._lk:
             self._ipcache[line] = ip
         return ip, ip is not None
