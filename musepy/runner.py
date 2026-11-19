@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import ssl
 import threading
 import time
 import urllib.request
@@ -33,6 +34,7 @@ AUTH_STAGES = PRE_SEND_STAGES | {"send_otp", "wait_otp", "confirm_otp", "complet
 TRANSPORT_MARKERS = (
     "curl: (35)", "curl: (28)", "curl: (7)", "curl: (56)", "curl: (52)",
     "timed out", "connectionerror", "connection reset", "connection refused",
+    "certificate", "ssl",
 )
 
 # Common Japanese name pool (family name / given name); register_completion semantics: first_name = given name, last_name = family name
@@ -108,6 +110,24 @@ PROXY_API_SOURCES = (
     ("databay",
      "https://databay.com/free-proxy-list/japan",
      "html"),
+    ("proxifly",
+     "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main"
+     "/proxies/countries/JP/data.txt",
+     "text"),
+    ("proxyscrape_v4",
+     "https://api.proxyscrape.com/v4/free-proxy-list/get"
+     "?request=display_proxies&proxy_format=protocolipport&format=text&country=jp",
+     "text"),
+    ("proxmint",
+     "https://proxmint.com/api/free-proxies?country=jp&format=txt",
+     "text"),
+    ("databay_labs",
+     "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master"
+     "/by-country/jp/http.txt",
+     "text"),
+    ("proxywing",
+     "https://proxywing.com/api/free-proxy-list?format=txt&country=JP&protocol=http",
+     "text"),
 )
 
 
@@ -127,6 +147,10 @@ def _fetch_text_lines(url, timeout):
             if lowered.startswith(scheme):
                 line = line[len(scheme):]
                 break
+        # Drop non-HTTP proxy schemes (socks4://, socks5://, ...): the
+        # runner only speaks HTTP proxies, and a "socks5" host would fail.
+        if "://" in line:
+            continue
         if line and ":" in line:
             lines.append(line)
     return lines
@@ -234,7 +258,7 @@ def proxy_endpoint(line):
 
 def _classify_error(exc):
     """Transport-layer failures are classified as transport_error; everything else is failed. No inference about IP bans is made."""
-    if isinstance(exc, (TimeoutError, ConnectionError)):
+    if isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError)):
         return "transport_error"
     text = str(exc).lower()
     if any(marker in text for marker in TRANSPORT_MARKERS):
