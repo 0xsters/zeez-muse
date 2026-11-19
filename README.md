@@ -162,6 +162,20 @@ own_code/own_code_status/reveal_status/is_revealed/ip/last_error`.
 OTP polling is idempotent: the start time is recorded before each `send_otp`, and `musepy/otp.py` only takes codes from after that time,
 taking the newest 6-digit code (45-second timeout, 0.6-second interval, 15-second per-request timeout).
 
+### Temp-mail OTP source (mtex)
+
+The batch only needs OTP source URLs returning `[{"otp","time"},...]`
+JSON, so any mailbox works. `mtex_poller.py` polls Cloudflare
+temp-mail inboxes (mail.mtex.my.id, dreamhunter2333/cloudflare_temp_email)
+and feeds muse.ai codes into the same Turso table the Vercel endpoint
+serves: one Address JWT per mailbox, `POST /api/new_address` mints a
+new address + JWT, `GET /api/parsed_mails` reads the inbox. Record time
+is the poller's first-seen UTC time, because parsedMail.created_at has
+no timezone and the batch only accepts tz-aware ISO strictly after send.
+JWTs live in `~/.cf-temp-mail/` (mode 600) and are never printed or
+committed. Usage: `python3 mtex_poller.py --generate 5`, then
+`python3 mtex_poller.py` (continuous, 10 s passes) while the batch runs.
+
 ## Telemetry Notes
 
 The site frontend reports two kinds of telemetry:
