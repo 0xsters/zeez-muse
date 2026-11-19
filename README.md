@@ -140,7 +140,7 @@ Batch fields in `config.json`:
 
 Scheduling semantics (aligned with the local implementation; no bypass behavior is promised):
 
-- **Proxy pool is fetched automatically**: at batch start the runner pulls fresh Japan HTTP proxies from free keyless APIs (Geonode, ProxyScrape v2, and the ProxyScrape free-proxy-list GitHub repo), merges them with `proxy_file`, and deduplicates. No manual copy-paste of proxy lists is needed; `proxy_file` stays as fallback, and `proxy_api: false` disables the fetch.
+- **Proxy pool is fetched automatically**: at batch start the runner pulls fresh Japan HTTP proxies from free keyless APIs (Geonode, ProxyScrape v2, the ProxyScrape free-proxy-list GitHub repo http + https files, GimmeProxy which returns one freshly-checked JP proxy per call, the HProxy by-country JP file, and the Databay Japan table), merges them with `proxy_file`, and deduplicates. No manual copy-paste of proxy lists is needed; `proxy_file` stays as fallback, and `proxy_api: false` disables the fetch.
 - **Japan-only egress gate**: a proxy line is usable only when its egress IP resolves and exits in Japan. A line whose exit node sits in another country (the list may label it JP while the exit is elsewhere) is skipped exactly like a dead line. If the geo lookup itself fails, the line is accepted unchecked so a down geo service never kills the run.
 - **A leading `http://` / `https://` scheme in a proxy line is tolerated**: it is stripped before parsing, so pasted list entries with their scheme no longer raise `proxy_line_format`.
 - **Each worker exclusively holds one sticky proxy**: a proxy line belongs to only one worker at a time (claim/release),

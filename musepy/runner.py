@@ -17,7 +17,9 @@ import concurrent.futures as cf
 import json
 import os
 import random
+import re
 import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 
@@ -92,12 +94,30 @@ PROXY_API_SOURCES = (
      "https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main"
      "/proxies/countries/jp/http/data.txt",
      "text"),
+    ("proxyscrape_github_https",
+     "https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main"
+     "/proxies/countries/jp/https/data.txt",
+     "text"),
+    ("gimmeproxy",
+     "https://gimmeproxy.com/api/getProxy?country=JP&protocol=http",
+     "gimme"),
+    ("hproxy",
+     "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main"
+     "/by-country/JP.txt",
+     "text"),
+    ("databay",
+     "https://databay.com/free-proxy-list/japan",
+     "html"),
 )
+
+
+_BROWSER_UA = {"User-Agent": "Mozilla/5.0"}
 
 
 def _fetch_text_lines(url, timeout):
     """Plain-text proxy list: one bare "host:port" per line, scheme stripped."""
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    req = urllib.request.Request(url, headers=_BROWSER_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         text = resp.read().decode("utf-8", "ignore")
     lines = []
     for raw in text.splitlines():
@@ -108,6 +128,24 @@ def _fetch_text_lines(url, timeout):
                 line = line[len(scheme):]
                 break
         if line and ":" in line:
+            lines.append(line)
+    return lines
+
+
+def _fetch_html_proxies(url, timeout):
+    """HTML proxy table (e.g. databay): scrape bare "host:port" occurrences.
+
+    The page renders its table server-side, so a plain fetch sees the rows;
+    a browser user-agent is required (default urllib UA gets a 403).
+    Duplicates are removed by the caller's _add dedup.
+    """
+    req = urllib.request.Request(url, headers=_BROWSER_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        html = resp.read().decode("utf-8", "ignore")
+    found = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b", html)
+    lines = []
+    for line in found:
+        if line not in lines:
             lines.append(line)
     return lines
 
@@ -159,6 +197,27 @@ def fetch_proxies_from_apis(timeout=12):
                         continue
                     lines.append(f"{item['ip']}:{item['port']}")
                 _add(name, lines)
+            elif kind == "gimme":
+                # GimmeProxy: one freshly-checked JP proxy per call; ask a
+                # few times (1s apart, polite) and keep the distinct hits.
+                # A single failed call must not kill the remaining tries.
+                # GimmeProxy rejects urllib's default user-agent (403), so
+                # send a browser one, like a normal visitor would.
+                lines = []
+                for _ in range(5):
+                    try:
+                        req = urllib.request.Request(
+                            url, headers=_BROWSER_UA)
+                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                            item = json.loads(resp.read().decode("utf-8"))
+                        if item.get("get") and item.get("country") == "JP" and item.get("ipPort"):
+                            lines.append(item["ipPort"])
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                _add(name, lines)
+            elif kind == "html":
+                _add(name, _fetch_html_proxies(url, timeout))
             else:
                 _add(name, _fetch_text_lines(url, timeout))
         except Exception as exc:  # noqa: BLE001 - one dead source must not stop the batch
