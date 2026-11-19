@@ -1,9 +1,9 @@
-"""离线冒烟：musepy.runner 批量调度语义（mock 网络，不联网）。
+"""Offline smoke test: musepy.runner batch scheduling semantics (mocked network, no real network).
 
-覆盖：select_otp 幂等 / wait_otp 轮询 / claim 独占 / sticky 复用与
-max_per_ip 换行 / pre-send 重试上限与 tried 标记 / 业务拒绝停批不换行 /
-region_waitlist 停止且账号保留 / 预算不超领 / 记录字段无 token/cookie。
-运行：python test_runner_smoke.py
+Coverage: select_otp idempotence / wait_otp polling / exclusive claims / sticky reuse and
+max_per_ip line switching / pre-send retry cap and tried marking / business rejections stop the batch without switching lines /
+region_waitlist stops the batch with the account kept / budget never over-claims / record fields contain no tokens/cookies.
+Run: python test_runner_smoke.py
 """
 
 import json
@@ -19,10 +19,10 @@ from musepy.otp import select_otp, wait_otp
 from musepy.runner import BatchRunner, mkproxy
 
 
-# ---------- 假客户端 / 假会话 ----------
+# ---------- Fake client / fake session ----------
 
 class FakeClient:
-    """MuseClient 形状的假实现；fail_stage 在指定阶段抛传输异常。"""
+    """A fake implementation shaped like MuseClient; fail_stage raises a transport exception at the given stage."""
 
     fp = "chrome142"
     lang = "ja"
@@ -111,7 +111,7 @@ class FakeOtpSession:
         pass
 
 
-# ---------- 测试脚手架 ----------
+# ---------- Test scaffolding ----------
 
 def make_runner(tmp, email_lines, proxy_lines, count, maker, *, codes=None, **overrides):
     otp_file = os.path.join(tmp, "otp.txt")
@@ -166,20 +166,20 @@ EMAILS = [f"e{i}@x.test----https://otp.example/{i}" for i in range(3)]
 PROXIES = ["10.0.0.1:8000:u:p", "10.0.0.2:8001:u:p", "10.0.0.3:8002:u:p"]
 
 
-# ---------- 用例 ----------
+# ---------- Test cases ----------
 
 def case_select_otp_idempotent():
     before = "2026-01-01T00:00:00+00:00"
     after = "2026-01-01T00:01:00+00:00"
-    records = [{"otp": "111111", "time": before},   # 早于 send 开始 → 排除
+    records = [{"otp": "111111", "time": before},   # earlier than the send start, excluded
                {"otp": "222222", "time": after},
-               {"otp": "333333", "time": after}]    # 最新一秒两个码 → 歧义
+               {"otp": "333333", "time": after}]    # two codes in the newest second, ambiguous
     assert select_otp(records, after) is None
     assert select_otp(records[:1], after) is None
     ok = [{"otp": "111111", "time": before},
           {"otp": "444444", "time": "2026-01-01T00:02:00+00:00"}]
     assert select_otp(ok, after) == "444444"
-    # 幂等：把边界推到该码之后，同一份记录不再返回旧码
+    # idempotence: pushing the boundary past that code means the same records no longer return the old code
     assert select_otp(ok, "2026-01-01T00:02:00+00:00") is None
 
 
@@ -203,14 +203,14 @@ def case_wait_otp_poll():
 def case_claim_exclusive():
     with tempfile.TemporaryDirectory() as d:
         runner, _ = make_runner(d, EMAILS[:1], PROXIES[:2], 1, FakeClient)
-        runner._proxy_claims.add(PROXIES[0])          # 其他 worker 已占用
+        runner._proxy_claims.add(PROXIES[0])          # already claimed by another worker
         line, _ = runner._pick_proxy()
-        assert line == PROXIES[1], line               # 不抢他人的行
+        assert line == PROXIES[1], line               # never take another worker's line
         runner._proxy_claims.add(PROXIES[1])
-        line, _ = runner._pick_proxy()                # 池耗尽 → 共享 + 日志
+        line, _ = runner._pick_proxy()                # pool exhausted, share + log
         assert line in PROXIES, line
         line, _ = runner._pick_proxy(current=PROXIES[0])
-        assert line == PROXIES[0], line               # sticky：复用自己的行
+        assert line == PROXIES[0], line               # sticky: reuse your own line
 
 
 def case_sticky_reuse_and_switch():
@@ -221,9 +221,9 @@ def case_sticky_reuse_and_switch():
         s = runner.summary()
         assert s["ok"] == 3 and s["ip_switches"] == 1, s
         urls = [c.proxy_url for c in clients]
-        assert urls[0] == urls[1]                     # 同一条 sticky 代理复用多个账号
+        assert urls[0] == urls[1]                     # the same sticky proxy reused across multiple accounts
         other = [mkproxy(p) for p in PROXIES[:2] if mkproxy(p) != urls[0]][0]
-        assert urls[2] == other                       # 达 max_per_ip 后换到另一条
+        assert urls[2] == other                       # switch to another line after reaching max_per_ip
 
 
 def case_presend_retry_cap():
@@ -233,13 +233,13 @@ def case_presend_retry_cap():
         runner.run()
         s = runner.summary()
         assert s["started"] == 2 and s["ok"] == 0, s
-        assert s["transport_error"] == 8, s           # 每邮箱 1+3 次尝试都计入 stats
-        assert s["ip_switches"] == 6, s               # 每邮箱 3 次换代理重试
+        assert s["transport_error"] == 8, s           # 1+3 attempts per email are all counted in stats
+        assert s["ip_switches"] == 6, s               # 3 proxy-switch retries per email
         assert s["remaining"] == 0 and s["stopped"] is False, s
-        assert len(clients) == 8, len(clients)        # 每邮箱 1 + 3 次换代理重试
+        assert len(clients) == 8, len(clients)        # 1 + 3 proxy-switch retries per email
         tried = tried_lines(d)
         assert "e0@x.test" in tried and "e1@x.test" in tried
-        assert "e2@x.test" not in tried               # 第三个邮箱未被消耗
+        assert "e2@x.test" not in tried               # the third email is not consumed
 
 
 def case_business_reject_stops():
@@ -251,10 +251,10 @@ def case_business_reject_stops():
         s = runner.summary()
         assert s["started"] == 1 and s["server_rejected"] == 1, s
         assert s["stopped"] is True and s["stop_reason"] == "workflow_paused", s
-        assert s["ip_switches"] == 0, s               # 业务拒绝不换行
+        assert s["ip_switches"] == 0, s               # business rejections do not switch lines
         assert len({c.proxy_url for c in clients}) == 1
         rec = load_record(d, "e0@x.test")
-        # 已注册但兑换未成功：status 口径与本地一致（outcome 仍计入 server_rejected）
+        # registered but redemption did not succeed: the status wording matches the local one (outcome still counts as server_rejected)
         assert rec["status"] == "registered_pending_redemption", rec
         assert rec["registered"] is True and rec["stage"] == "redeem", rec
         assert rec["last_error"].startswith("redemption_unverified"), rec
@@ -269,7 +269,7 @@ def case_region_waitlist():
         s = runner.summary()
         assert s["started"] == 1 and s["stopped"] is True, s
         rec = load_record(d, "e0@x.test")
-        assert rec["status"] == "registered_waitlist", rec   # 账号保留
+        assert rec["status"] == "registered_waitlist", rec   # account kept
         assert rec["registered"] is True and rec["stage"] == "session_bootstrap", rec
         assert rec["last_error"] == "region_waitlist", rec
 
@@ -317,7 +317,7 @@ def main():
     for name, fn in tests:
         fn()
         print(f"[PASS] {name}")
-    print(f"冒烟通过 {len(tests)}/{len(tests)}")
+    print(f"Smoke tests passed {len(tests)}/{len(tests)}")
 
 
 if __name__ == "__main__":

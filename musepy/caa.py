@@ -1,8 +1,8 @@
 """
-caa-events 上报（Create Account Analytics）
+caa-events reporting (Create Account Analytics)
 
-前端通过 navigator.sendBeacon 逐步骤上报注册漏斗事件，同一 waterfall_id
-贯穿整个流程。这些事件不参与注册判定，但构成完整的漏斗数据。
+The frontend reports registration-funnel events step by step via navigator.sendBeacon, with the same waterfall_id
+running through the whole flow. These events do not affect the registration decision, but they make up the complete funnel data.
 """
 
 import json
@@ -43,7 +43,7 @@ class Caa:
         except Exception:
             return None
 
-    # ---- 联系点页 ----
+    # ---- Contact-point page ----
 
     def page_shown(self, s):
         return self._send(s, [{
@@ -67,7 +67,7 @@ class Caa:
             "extra_client_data": {"is_native": "1"},
             "waterfall_id": self.wid, "client_time_ms": _ms()}])
 
-    # ---- 注册漏斗 ----
+    # ---- Registration funnel ----
 
     def registration_start(self, s):
         return self._send(s, [

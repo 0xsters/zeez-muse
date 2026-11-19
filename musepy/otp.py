@@ -1,7 +1,7 @@
-"""OTP 验证码轮询（开源版）。
+"""OTP code polling (open-source edition).
 
-select_otp 为纯函数；wait_otp 轮询 OTP 源 URL，只取 send 开始时间之后的
-新 6 位验证码（幂等：同一封邮件重试不会把旧码再当新码用）。
+select_otp is a pure function; wait_otp polls the OTP source URL and only takes codes from after the send start time,
+taking the newest 6-digit code (idempotent: retrying the same email never treats an old code as new).
 """
 
 import json
@@ -13,7 +13,7 @@ UTC = timezone.utc
 
 
 def parse_iso8601(value):
-    """解析为带时区的 UTC 时间；naive 输入视为未知，返回 None。"""
+    """Parse into a timezone-aware UTC time; naive input is treated as unknown and returns None."""
     try:
         if isinstance(value, datetime):
             parsed = value
@@ -29,10 +29,10 @@ def parse_iso8601(value):
 
 
 def select_otp(records, after):
-    """取严格晚于 after 的最新 6 位数字验证码；最新一秒出现多个不同码视为歧义。
+    """Take the newest 6-digit numeric OTP strictly later than after; multiple different codes in the newest second count as ambiguous.
 
     records: [{"otp": "123456", "time": "<ISO8601>"}, ...]
-    after:   本次 send_otp 开始时间（ISO8601 字符串或 datetime）。
+    after:   the start time of this send_otp (ISO8601 string or datetime).
     """
     boundary = parse_iso8601(after)
     if boundary is None or not isinstance(records, list):
@@ -56,12 +56,12 @@ def select_otp(records, after):
 
 def wait_otp(url, after, *, timeout=45, poll_interval=0.6, request_timeout=15,
              session_factory=None):
-    """轮询 OTP 源 URL 直到出现新验证码。
+    """Poll the OTP source URL until a new OTP code appears.
 
-    - 每 poll_interval 秒 GET 一次；单次请求超时 request_timeout；
-    - 总超时 timeout 秒（默认 45s）；
-    - 源返回非 200 / 非 JSON 列表 → None；网络异常向上抛（按 transport_error 处理）；
-    - session_factory 可注入假会话（离线测试用），默认新建 curl_cffi Session。
+    - GET once every poll_interval seconds; each request times out after request_timeout;
+    - total timeout is timeout seconds (default 45s);
+    - a non-200 / non-JSON-list response from the source returns None; network exceptions propagate (handled as transport_error);
+    - session_factory can inject a fake session (for offline tests); by default a new curl_cffi Session is created.
     """
     if session_factory is not None:
         session = session_factory()

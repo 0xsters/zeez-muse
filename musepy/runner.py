@@ -1,16 +1,16 @@
-"""多账号批量调度（开源版，语义对齐本地实现）。
+"""Multi-account batch scheduler (open-source edition, semantics aligned with the local implementation).
 
-调度规则：
-- worker 独占一条 sticky 代理行（claim/release），不抢他人的行；池耗尽才共享并打日志。
-- max_per_ip 按"验证成功数"计：达到上限释放当前行并换行（原行本轮避开）。
-- pre-send 阶段（initialized/bootstrap/restart，OTP 未发出）的传输失败：释放当前行、
-  内存标记 pool_bad、同邮箱换代理重试 <=3 次，不消耗新邮箱；仍失败则标记 tried。
-- 业务拒绝 / pending / 已发 OTP 后的失败：整批停止——不换行、不重试、不补号。
-- region_waitlist：账号已注册但地区受限——记录 registered_waitlist（账号保留）并停止。
-- 预算 = 领取的不同邮箱数，失败不补号。
+Scheduling rules:
+- A worker exclusively holds one sticky proxy line (claim/release) and never takes another worker's line; lines are only shared (and logged) when the pool is exhausted.
+- max_per_ip counts "successful verifications": when the limit is reached, release the current line and switch lines (the old line is avoided for the rest of the round).
+- Transport failures in the pre-send phase (initialized/bootstrap/restart, OTP not yet sent): release the current line,
+  mark pool_bad in memory, retry with a different proxy for the same email <= 3 times without consuming a new email; if it still fails, mark it tried.
+- Business rejections / pending / failures after the OTP was sent: stop the whole batch: no proxy switch, no retry, no replacement email.
+- region_waitlist: the account is registered but region-restricted: record registered_waitlist (keeping the account) and stop.
+- Budget = the number of distinct emails claimed; failures are not replaced.
 
-每账号结果写入 output_dir/<email>.json（简化字段）。frl_access_token 与
-hatch_sess 仅在内存中使用，不落盘。仅供个人学习与研究使用。
+Each account's result is written to output_dir/<email>.json (simplified fields). frl_access_token and
+hatch_sess are used in memory only and are never written to disk. For personal learning and research only.
 """
 
 import concurrent.futures as cf
@@ -32,7 +32,7 @@ TRANSPORT_MARKERS = (
     "timed out", "connectionerror", "connection reset", "connection refused",
 )
 
-# 常用日本姓名池（姓 / 名），register_completion 语义：first_name=名、last_name=姓
+# Common Japanese name pool (family name / given name); register_completion semantics: first_name = given name, last_name = family name
 SURNAMES = ["佐藤", "鈴木", "高橋", "田中", "伊藤", "渡辺", "山本", "中村", "小林", "加藤",
             "吉田", "山田", "佐々木", "山口", "松本", "井上", "木村", "林", "斎藤", "清水",
             "山崎", "森", "池田", "橋本", "阿部", "石川", "前田", "藤田", "小川", "岡田",
@@ -64,13 +64,13 @@ def mkproxy(line):
 
 
 def proxy_endpoint(line):
-    """仅取 host:port，用于日志（不打印凭据）。"""
+    """Take only host:port, for logging (never print credentials)."""
     parts = (line or "").split(":")
     return f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else None
 
 
 def _classify_error(exc):
-    """传输层失败归 transport_error；其余归 failed。不做任何 IP 封禁推断。"""
+    """Transport-layer failures are classified as transport_error; everything else is failed. No inference about IP bans is made."""
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return "transport_error"
     text = str(exc).lower()
@@ -84,7 +84,7 @@ def utc_stamp():
 
 
 class BatchRunner:
-    """多账号批量调度器。一个账号 = 一个新 MuseClient 实例 + 一条当前 sticky 代理行。"""
+    """Multi-account batch scheduler. One account = a new MuseClient instance + one current sticky proxy line."""
 
     def __init__(self, config, *, client_factory=None, otp_waiter=None, ip_resolver=None):
         self.cfg = config
@@ -99,7 +99,7 @@ class BatchRunner:
         self.tried_file = config.get("tried_file")
         self.send_caa = bool(config.get("send_caa", False))
         self.resolve_ip = bool(config.get("resolve_ip", True))
-        # 注入点（离线测试用）：客户端工厂 / OTP 轮询 / 出口 IP 解析
+        # Injection points (for offline tests): client factory / OTP polling / egress IP resolution
         self.client_factory = client_factory or self._default_client_factory
         self.otp_waiter = otp_waiter or self._default_otp_waiter
         self.ip_resolver = ip_resolver or self._default_ip_resolver
@@ -114,7 +114,7 @@ class BatchRunner:
         self._stats = {key: 0 for key in ("started", "ok", "pending", "server_rejected",
                                           "transport_error", "failed", "ip_switches")}
 
-    # ---------- 默认依赖 ----------
+    # ---------- Default dependencies ----------
 
     def _default_client_factory(self, proxy_url):
         return MuseClient(proxy=proxy_url, impersonate=self.fp, lang=self.lang)
@@ -131,10 +131,10 @@ class BatchRunner:
         ip = r.text.strip()
         return ip if ip.count(".") == 3 else None
 
-    # ---------- 池加载（预算 = count 个不同邮箱） ----------
+    # ---------- Pool loading (budget = count distinct emails) ----------
 
     def init(self, count=30):
-        """加载邮箱/代理/验证码池。失败不补号；已在 tried_file 的邮箱跳过。"""
+        """Load the email/proxy/OTP pools. Failures are not replaced; emails already in tried_file are skipped."""
         count = int(count)
         if count < 1:
             raise ValueError("count_must_be_positive")
@@ -145,7 +145,7 @@ class BatchRunner:
             email, url = line.split("----", 1)
             email = email.strip()
             if not email or any(ch in email for ch in "/\\:\x00"):
-                continue  # 非法记录名，直接跳过
+                continue  # invalid record name, skip it directly
             rows[email] = url.strip()
         tried = (set(_lines(self.tried_file))
                  if self.tried_file and os.path.exists(self.tried_file) else set())
@@ -169,7 +169,7 @@ class BatchRunner:
         os.makedirs(self.output_dir, exist_ok=True)
         return len(self.QUEUE)
 
-    # ---------- 批次状态 ----------
+    # ---------- Batch state ----------
 
     def next_job(self):
         with self._lk:
@@ -194,10 +194,10 @@ class BatchRunner:
                     "stopped": self._stop.is_set(),
                     "stop_reason": self._stop_reason}
 
-    # ---------- 代理调度（worker 独占 sticky） ----------
+    # ---------- Proxy scheduling (worker-exclusive sticky) ----------
 
     def _resolve_ip(self, line):
-        """resolve_ip=false → (None, True)：出口 IP 未知但行仍可用。"""
+        """resolve_ip=false → (None, True): the egress IP is unknown but the line is still usable."""
         if not self.resolve_ip:
             return None, True
         with self._lk:
@@ -215,10 +215,10 @@ class BatchRunner:
         return ip, ip is not None
 
     def _pick_proxy(self, *, current=None, avoid=None):
-        """worker 独占 sticky 选择：已占用的行不交给其他 worker。
+        """Worker-exclusive sticky selection: an occupied line is not handed to another worker.
 
-        池耗尽或全部校验失败时：先复用自己的当前行，再找未占用行，
-        最后才共享（打日志）。avoid 排除刚换掉的行（达 max_per_ip 后）。
+        When the pool is exhausted or all validations fail: first reuse your own current line, then look for an unoccupied line,
+        and only share as a last resort (logged). avoid excludes the line just replaced (after reaching max_per_ip).
         """
         for _ in range(400):
             line = random.choice(self.PX)
@@ -267,13 +267,13 @@ class BatchRunner:
         return line, self._ipcache.get(line)
 
     def _release(self, line):
-        """释放本 worker 的 sticky 占用；不动 pool_bad。"""
+        """Release this worker's sticky claim; leave pool_bad untouched."""
         if not line:
             return
         with self._lk:
             self._proxy_claims.discard(line)
 
-    # ---------- 记录（简化字段，不含 token/cookie） ----------
+    # ---------- Records (simplified fields, no tokens/cookies) ----------
 
     def _save_record(self, rec):
         path = os.path.join(self.output_dir, rec["email"] + ".json")
@@ -308,7 +308,7 @@ class BatchRunner:
         return None
 
     def _finish(self, email, rec, outcome, reason, stage, *, status=None):
-        """统一收口：落盘 → 决定是否整批停止。返回 (outcome, detail)。"""
+        """Single exit point: write to disk, then decide whether to stop the whole batch. Returns (outcome, detail)."""
         rec.update(stage=stage, last_error=reason)
         if status is None:
             if rec.get("registered") and outcome == "ok":
@@ -327,13 +327,13 @@ class BatchRunner:
         return outcome, {"stage": stage, "status": status,
                          "registered": bool(rec.get("registered")), "reason": reason}
 
-    # ---------- 单账号全链（顺序对齐本地实现） ----------
+    # ---------- Single-account full chain (order aligned with the local implementation) ----------
 
     def register_one(self, email, proxy_line):
         """open→restart→send_otp→wait_otp→confirm→completion→activate_session
-        （onboarding 门）→accept_tos→wake→sharing→invite→redeem→own_code。
+        (onboarding gate) → accept_tos → wake → sharing → invite → redeem → own_code.
 
-        返回 (outcome, detail)；outcome: ok|server_rejected|pending|transport_error|failed
+        Returns (outcome, detail); outcome: ok|server_rejected|pending|transport_error|failed
         """
         rec = {"email": email, "status": "pending", "stage": "initialized",
                "registered": False, "own_code": None, "own_code_status": None,
@@ -378,7 +378,7 @@ class BatchRunner:
             token, uid = auth.get("frl_access_token"), auth.get("frl_account_id")
             if not token:
                 return self._finish(email, rec, "pending", "completion_result_unknown", stage)
-            rec["registered"] = True  # token 仅内存使用，不落盘
+            rec["registered"] = True  # token is used in memory only, never written to disk
             if caa:
                 caa.create_success(client.s, uid)
                 caa.login_success(client.s, uid)
@@ -451,18 +451,18 @@ class BatchRunner:
                 self._stats[outcome if outcome in self._stats else "failed"] += 1
             if outcome == "ok":
                 self._stamp_tried(email)
-                uses += 1  # max_per_ip 只按验证成功数计
+                uses += 1  # max_per_ip only counts successful verifications
                 email, retries = None, 0
                 if uses >= self.max_per_ip and not self._stop.is_set():
                     self._release(proxy_line)
                     with self._lk:
                         self._stats["ip_switches"] += 1
-                    avoid = proxy_line  # 换行时避开刚用满的那条
+                    avoid = proxy_line  # when switching lines, avoid the one just used up
                     proxy_line, uses = None, 0
             elif (outcome == "transport_error" and retries < 3
                     and detail.get("stage") in PRE_SEND_STAGES):
-                # pre-send 传输失败、零副作用：释放当前代理，同邮箱换代理重试，
-                # 不消耗新邮箱；pool_bad 仅内存标记，不写任何黑名单文件。
+                # pre-send transport failure, zero side effects: release the current proxy and retry with a different proxy for the same email,
+                # without consuming a new email; pool_bad is only marked in memory, no blacklist file is written.
                 retries += 1
                 self._release(proxy_line)
                 with self._lk:
@@ -472,8 +472,8 @@ class BatchRunner:
                     self._stats["ip_switches"] += 1
                 print(f"  [W{wid}] proxy_retry#{retries} {email}", flush=True)
             else:
-                # 业务拒绝 / pending / 已发 OTP 后的失败：不换行、不重试、不补号；
-                # 整批停止由 register_one 的 _finish 里 request_stop 生效。
+                # Business rejections / pending / failures after the OTP was sent: no proxy switch, no retry, no replacement email;
+                # stopping the whole batch takes effect via request_stop in register_one's _finish.
                 self._stamp_tried(email)
                 email, retries = None, 0
             if self._stop.is_set():

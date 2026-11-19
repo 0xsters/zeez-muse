@@ -1,8 +1,8 @@
-"""多账号批量注册/兑换示例。
+"""Multi-account batch registration/redemption example.
 
-用法: python example_batch.py [count]
-读取 config.json（见 config.example.json 的批量字段），按批量调度语义运行，
-结束打印 batch_summary JSON。仅供个人学习与研究使用。
+Usage: python example_batch.py [count]
+Reads config.json (see the batch fields in config.example.json) and runs with batch scheduling semantics,
+then prints the batch_summary JSON at the end. For personal learning and research only.
 """
 
 import json
@@ -16,7 +16,7 @@ from musepy.runner import BatchRunner
 
 def load_config(path="config.json"):
     if not os.path.exists(path):
-        raise SystemExit(f"缺少配置文件 {path}，请从 config.example.json 复制并填写")
+        raise SystemExit(f"Missing config file {path}; copy config.example.json and fill it in")
     with open(path, encoding="utf-8") as stream:
         return json.load(stream)
 
@@ -27,7 +27,7 @@ def main():
     try:
         queued = runner.init(count)
     except ValueError as exc:
-        raise SystemExit(f"配置不完整: {exc}")
+        raise SystemExit(f"Incomplete config: {exc}")
     print(f"[i] queued={queued} workers={runner.workers} "
           f"max_per_ip={runner.max_per_ip}", flush=True)
     runner.run()

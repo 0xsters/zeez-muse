@@ -1,8 +1,8 @@
 """
-falco 埋点上报（可选）
+falco telemetry reporting (optional)
 
-站点前端会通过 POST /api/falco 批量上报行为事件。缺失这些上报不会直接
-导致注册失败，但会让会话的行为特征显著区别于真实浏览器。
+The site frontend reports behavior events in bulk via POST /api/falco. Missing these reports does not directly
+cause registration to fail, but it makes the session's behavior profile noticeably different from a real browser.
 """
 
 import json
@@ -76,7 +76,7 @@ def perf(uri, nav_type="navigate", seconds=None):
 
 
 def send(session, impersonate, lang, session_id, events):
-    """发送一批事件；失败静默"""
+    """Send a batch of events; failures are silent"""
     if not events:
         return None
     body = {"sessionId": session_id, "user": {"kind": "loggedOut"},
