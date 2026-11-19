@@ -19,9 +19,14 @@ What it does:
   {"address", "jwt"} to ~/.cf-temp-mail/addresses.json (mode 600).
 - poll: for each address in addresses.json (+ the main address),
   GET /api/parsed_mails, take the first 6-digit code from a muse.ai
-  sender, and INSERT OR IGNORE it into the same Turso table otps the
-  Vercel endpoint serves. The batch runner then works unchanged (it
-  polls Turso via otp-urls.txt).
+  or Meta sender, and INSERT OR IGNORE it into the same Turso table
+  otps the Vercel endpoint serves. The batch runner then works
+  unchanged (it polls Turso via otp-urls.txt).
+  PROVEN 2026-11-19 20:09 WIB: the muse.ai OTP arrives as a Meta
+  account-verification email from security@account.meta.com. The code
+  in that mail passes the script's confirm-otp step, so the Meta mail
+  IS the OTP mail. A sender filter that only accepts muse.ai misses
+  every OTP; that was the real bug all day, not the mailbox.
 - Record time is the poller's first-seen UTC time (microsecond ISO):
   parsedMail.created_at has NO timezone ("YYYY-MM-DD HH:MM:SS"), and
   the batch's select_otp only accepts tz-aware ISO strictly after the
@@ -274,13 +279,17 @@ def check_address(rec, turso_token):
         code = m.group(1) if m else ""
         sender = (mail.get("sender") or mail.get("source") or "").lower()
         subject = (mail.get("subject") or "").lower()
-        is_muse = "muse.ai" in sender or "muse.ai" in subject \
-            or "muse" in sender
+        # PROVEN 2026-11-19 20:09 WIB: the muse.ai OTP arrives as a
+        # Meta account-verification email (security@account.meta.com).
+        # Its 6-digit code passes confirm-otp, so Meta senders are OTP
+        # senders too. Only accepting muse.ai was the bug.
+        is_otp_sender = ("muse.ai" in sender or "muse.ai" in subject
+                         or "muse" in sender or "meta.com" in sender)
         log_seen(email_addr, mail, code)
         if not code:
             continue
-        if not is_muse:
-            print("[%s] non-muse.ai code seen (sender %s), logged only"
+        if not is_otp_sender:
+            print("[%s] non-OTP code seen (sender %s), logged only"
                   % (email_addr, sender or "?"), flush=True)
             continue
         if insert_otp(email_addr, code, _now_iso(), turso_token):

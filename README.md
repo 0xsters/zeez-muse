@@ -167,11 +167,16 @@ taking the newest 6-digit code (45-second timeout, 0.6-second interval, 15-secon
 The batch only needs OTP source URLs returning `[{"otp","time"},...]`
 JSON, so any mailbox works. `mtex_poller.py` polls Cloudflare
 temp-mail inboxes (mail.mtex.my.id, dreamhunter2333/cloudflare_temp_email)
-and feeds muse.ai codes into the same Turso table the Vercel endpoint
+and feeds OTP codes into the same Turso table the Vercel endpoint
 serves: one Address JWT per mailbox, `POST /api/new_address` mints a
 new address + JWT, `GET /api/parsed_mails` reads the inbox. Record time
 is the poller's first-seen UTC time, because parsedMail.created_at has
 no timezone and the batch only accepts tz-aware ISO strictly after send.
+**The OTP arrives as a Meta account-verification email from
+`security@account.meta.com`, not from muse.ai** (proven 2026-11-19: the
+code in that mail passes confirm-otp). The poller therefore accepts
+codes from muse.ai and Meta senders; a filter that only accepts muse.ai
+misses every OTP.
 JWTs live in `~/.cf-temp-mail/` (mode 600) and are never printed or
 committed. Usage: `python3 mtex_poller.py --generate 5`, then
 `python3 mtex_poller.py` (continuous, 10 s passes) while the batch runs.
